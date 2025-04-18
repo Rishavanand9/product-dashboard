@@ -1,7 +1,7 @@
-
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
+import { API_ENDPOINTS, axiosConfig } from './api/config';
 
 const AppContainer = styled.div`
   max-width: 800px;
@@ -94,15 +94,6 @@ const StatusMessage = styled.p`
   font-weight: ${props => (props.error ? 'bold' : 'normal')};
 `;
 
-const FileName = styled.div`
-  margin-top: 1rem;
-  padding: 0.5rem;
-  background-color: #e9ecef;
-  border-radius: 4px;
-  display: inline-block;
-  min-width: 200px;
-`;
-
 const ProgressContainer = styled.div`
   width: 100%;
   height: 8px;
@@ -150,6 +141,35 @@ const StatusIcon = styled.div`
     border-radius: 50%;
   `}
 `;
+// Add new styled components
+const FileInfo = styled.div`
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  text-align: left;
+`;
+
+const ElapsedTime = styled.span`
+  color: #666;
+  font-size: 0.9rem;
+  margin-left: 1rem;
+`;
+
+const ErrorDetails = styled.pre`
+  background-color: #ffebee;
+  padding: 1rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  overflow-x: auto;
+  margin-top: 1rem;
+`;
+
+const AcceptedFormats = styled.div`
+  color: #666;
+  font-size: 0.9rem;
+  margin-top: 0.5rem;
+`;
 
 function App() {
   const [file, setFile] = useState(null);
@@ -158,14 +178,27 @@ function App() {
   const [error, setError] = useState(false);
   const [progress, setProgress] = useState(0);
   const [downloadUrl, setDownloadUrl] = useState(null);
+  const [jobStatus, setJobStatus] = useState(null);
+  const [statusCheckInterval, setStatusCheckInterval] = useState(null);
 
   const handleFileChange = (e) => {
-    const selectedFile = e.target.files[0];
+    const selectedFile = e.target.files?.[0];
     if (selectedFile) {
+      // Validate file type
+      const validTypes = ['.csv', '.xlsx', '.xls'];
+      const fileExtension = selectedFile.name.toLowerCase().slice(selectedFile.name.lastIndexOf('.'));
+      
+      if (!validTypes.includes(fileExtension)) {
+        setError(true);
+        setMessage('Please select a valid Excel or CSV file');
+        return;
+      }
+
       setFile(selectedFile);
       setMessage(`File selected: ${selectedFile.name}`);
       setError(false);
       setDownloadUrl(null);
+      setJobStatus(null);
     }
   };
 
@@ -177,68 +210,87 @@ function App() {
     }
 
     setIsProcessing(true);
-    setMessage('Processing your file...');
+    setMessage('Uploading your file...');
     setError(false);
     setProgress(0);
 
-    // Create a FormData object to send the file
     const formData = new FormData();
     formData.append('file', file);
 
     try {
-      // Simulating progress updates
-      const progressInterval = setInterval(() => {
-        setProgress(prev => {
-          const newProgress = prev + Math.random() * 10;
-          return newProgress >= 95 ? 95 : newProgress;
-        });
-      }, 500);
-
-      // Replace with your actual API endpoint
-      const response = await axios.post('https://your-api-endpoint.com/process', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
-      });
+      const response = await axios.post(
+        API_ENDPOINTS.UPLOAD,
+        formData,
+        axiosConfig
+      );
       
-      // Clear the interval and set progress to 100%
-      clearInterval(progressInterval);
-      setProgress(100);
-      
-      // In a real application, the API would return a URL or blob for download
-      // For demo purposes, we'll create a fake download URL
-      const responseData = response.data || {};
-      
-      // Simulating a download URL from the API response
-      // In a real app, you would use the actual URL from the API
-      const fileDownloadUrl = responseData.downloadUrl || URL.createObjectURL(new Blob(['Processed data'], { type: 'text/csv' }));
-      
-      setDownloadUrl(fileDownloadUrl);
-      setMessage('Processing complete! Your file is ready for download.');
+      setMessage('File uploaded successfully! Processing has started...');
+      startStatusChecking(response.data.job_id);
     } catch (error) {
+      console.error('Error uploading file:', error);
       setError(true);
-      setMessage(`Error processing file: ${error.message || 'Unknown error'}`);
-    } finally {
+      setMessage('Error uploading file. Please ensure the file is not corrupted or too large.');
       setIsProcessing(false);
     }
   };
 
+  const startStatusChecking = (jobId) => {
+    // Clear any existing interval
+    if (statusCheckInterval) {
+      clearInterval(statusCheckInterval);
+    }
+
+    const interval = setInterval(async () => {
+      try {
+        const response = await axios.get(`${API_ENDPOINTS.STATUS}/${jobId}`);
+        const status = response.data;
+        setJobStatus(status);
+        setProgress(status.progress_percentage);
+
+        if (status.status === 'completed') {
+          clearInterval(interval);
+          setDownloadUrl(`${API_ENDPOINTS.DOWNLOAD}/${jobId}`);
+          setMessage('Processing completed! Your enhanced product data is ready for download.');
+          setIsProcessing(false);
+        } else if (status.status === 'failed') {
+          clearInterval(interval);
+          setError(true);
+          setMessage(`Processing failed: ${status.error || 'Unknown error occurred'}`);
+          setIsProcessing(false);
+        } else {
+          setMessage(`Processing your products: ${status.processed} of ${status.total} items completed`);
+        }
+      } catch (error) {
+        console.error('Error checking job status:', error);
+        clearInterval(interval);
+        setError(true);
+        setMessage('Lost connection to the server. Please try again.');
+        setIsProcessing(false);
+      }
+    }, 2000);
+
+    setStatusCheckInterval(interval);
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (statusCheckInterval) {
+        clearInterval(statusCheckInterval);
+      }
+    };
+  }, [statusCheckInterval]);
+
   const downloadFile = () => {
     if (downloadUrl) {
-      // In a real app, you might want to use file-saver or a similar library
-      const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = `processed-${file.name}`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
+      window.location.href = downloadUrl;
     }
   };
 
   return (
     <AppContainer>
       <Header>
-        <Title>Product Details Dashboard</Title>
+        <Title>Amazon Product Details Enhancer</Title>
       </Header>
       
       <UploadSection>
@@ -252,28 +304,39 @@ function App() {
           Select Excel/CSV File
         </FileLabel>
         
+        <AcceptedFormats>
+          Accepted formats: .xlsx, .xls, .csv
+        </AcceptedFormats>
+        
         {file && (
-          <FileName>
-            {file.name}
-          </FileName>
+          <FileInfo>
+            <strong>File:</strong> {file.name}
+            <br />
+            <strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB
+          </FileInfo>
         )}
         
         {file && !isProcessing && !downloadUrl && (
           <div>
             <ProcessButton onClick={processFile} disabled={isProcessing}>
-              Process File
+              Enhance Product Details
             </ProcessButton>
           </div>
         )}
         
-        {isProcessing && (
+        {isProcessing && jobStatus && (
           <div>
             <ProgressContainer>
               <ProgressBar progress={progress} />
             </ProgressContainer>
             <StatusContainer>
               <StatusIcon processing />
-              <StatusMessage>{message}</StatusMessage>
+              <StatusMessage>
+                {message}
+                <ElapsedTime>
+                  Time elapsed: {jobStatus.elapsed_formatted}
+                </ElapsedTime>
+              </StatusMessage>
             </StatusContainer>
           </div>
         )}
@@ -285,7 +348,7 @@ function App() {
               <StatusMessage>{message}</StatusMessage>
             </StatusContainer>
             <DownloadButton onClick={downloadFile}>
-              Download Processed File
+              Download Enhanced Product Data
             </DownloadButton>
           </div>
         )}
@@ -294,6 +357,9 @@ function App() {
           <StatusContainer>
             <StatusIcon error />
             <StatusMessage error>{message}</StatusMessage>
+            {jobStatus?.error && (
+              <ErrorDetails>{jobStatus.error}</ErrorDetails>
+            )}
           </StatusContainer>
         )}
       </UploadSection>
