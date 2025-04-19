@@ -2,15 +2,19 @@ import pandas as pd
 import time
 import uuid
 import os
+import stat
 import tempfile
-import json
-import re
 import datetime
-import google.generativeai as genai
+import random
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from typing import Dict, List, Optional
 from fastapi.middleware.cors import CORSMiddleware
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 app = FastAPI()
 
@@ -22,90 +26,224 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Configure Gemini API
-API_KEY = ""  # Replace with your actual Gemini API key
-genai.configure(api_key=API_KEY)
-
 # Global variables to track job status
 active_jobs: Dict[str, Dict] = {}
 
-def get_product_info_from_gemini(item_name: str, retry_count: int = 0):
-    """Get detailed product information from Gemini API with retry mechanism"""
+driver_executable_path = r"D:\FinalProject\product-dashboard\backend\extras\chrome-win64\chrome-win64\chrome.exe"
+st = os.stat(driver_executable_path)
+os.chmod(driver_executable_path, st.st_mode | stat.S_IEXEC)
+
+def random_sleep(min_seconds=2, max_seconds=5):
+    """Random sleep to mimic human behavior and avoid bot detection"""
+    sleep_time = random.uniform(min_seconds, max_seconds)
+    time.sleep(sleep_time)
+    return sleep_time
+
+def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
+    """Get detailed product information using Selenium with retry mechanism"""
     max_retries = 3
+    product_info = {}
+    driver = None
+    
     try:
-        print(f"[{datetime.datetime.now()}] Requesting Gemini API for product: {item_name}")
+        print(f"[{datetime.datetime.now()}] Searching Amazon for product: {item_name}")
         
-        # Enhanced prompt to get specific product details
-        prompt = f"""
-        Search for the product "{item_name}" on Amazon.in and provide detailed information in JSON format.
-        Include the following fields:
+        # Configure Chrome options
+        options = uc.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
         
-        1. Basic Information:
-           - title: Product title
-           - description: Brief product description
-           - image: Image URL if available
-           - url: Amazon product URL
-           - price: Current price
-           - composition: Product composition or ingredients
+        # Initialize undetected chromedriver
+        driver = uc.Chrome(options=options, browser_executable_path=driver_executable_path)
         
-        2. Technical Details (if available):
-           - discontinued: Is product discontinued (Yes/No)
-           - unspsc_code: UNSPSC Code and category
-           - dimensions: Product dimensions
-           - weight: Item weight
-           - manufacturer: Manufacturer name
-           - asin: Amazon ASIN
-           - model_number: Item model number
-           - country_of_origin: Country of origin
-           - date_first_available: When product was first available
-           - included_components: What's included in the package
-           - generic_name: Generic product name
+        # Add random user agent through undetected_chromedriver config
         
-        Format the response as valid JSON with these exact keys. If any information is not available, use empty string or "N/A".
-        """
+        # Go to Amazon.in
+        driver.get("https://www.amazon.in")
         
-        # Make request to Gemini
-        model = genai.GenerativeModel('gemini-1.5-pro')
-        response = model.generate_content(prompt)
+        random_sleep(3, 6)
         
-        # Parse the response
+        # Accept cookies if present
         try:
-            # Find JSON-like content in the response
-            json_match = re.search(r'```json\s*(.*?)\s*```', response.text, re.DOTALL)
-            if json_match:
-                json_text = json_match.group(1)
-            else:
-                json_text = response.text
+            cookie_button = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.ID, "sp-cc-accept"))
+            )
+            cookie_button.click()
+            random_sleep(1, 3)
+        except TimeoutException:
+            # Cookie dialog might not appear
+            pass
+        
+        # Search for the product
+        search_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "twotabsearchtextbox"))
+        )
+        search_box.clear()
+        # Type like a human - letter by letter with random delays
+        for char in item_name:
+            search_box.send_keys(char)
+            time.sleep(random.uniform(0.05, 0.2))
+        
+        search_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "nav-search-submit-button"))
+        )
+        search_button.click()
+        
+        random_sleep(3, 7)
+        
+        # Click on the first search result
+        try:
+            first_result = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "div.s-result-item[data-component-type='s-search-result'] img"))
+            )
+            first_result.click()
+            
+            # Switch to the new tab if opened
+            if len(driver.window_handles) > 1:
+                driver.switch_to.window(driver.window_handles[1])
                 
-            # Clean up and parse the JSON
-            product_info = json.loads(json_text)
+            random_sleep(4, 8)
             
-            print(f"[{datetime.datetime.now()}] Successfully processed: {item_name}")
-            return product_info
+            # Extract product information
+            product_info = extract_product_details(driver)
             
-        except Exception as json_error:
-            error_msg = f"Failed to parse Gemini response: {str(json_error)}"
-            print(f"[{datetime.datetime.now()}] ERROR: {error_msg} for product: {item_name}")
-            return {
-                "error": error_msg,
-                "raw_response": response.text
-            }
+            print(f"[{datetime.datetime.now()}] Successfully scraped details for: {item_name}")
+            
+        except Exception as e:
+            print(f"[{datetime.datetime.now()}] Error finding or clicking first result: {str(e)}")
+            product_info["error"] = f"Failed to find product results: {str(e)}"
             
     except Exception as e:
-        error_msg = f"Gemini API error: {str(e)}"
+        error_msg = f"Selenium error: {str(e)}"
         print(f"[{datetime.datetime.now()}] ERROR: {error_msg} for product: {item_name}")
+        product_info["error"] = error_msg
         
         # Retry logic
         if retry_count < max_retries:
             retry_delay = (retry_count + 1) * 5  # Exponential backoff
             print(f"[{datetime.datetime.now()}] Retrying in {retry_delay} seconds (attempt {retry_count + 1}/{max_retries})...")
             time.sleep(retry_delay)
-            return get_product_info_from_gemini(item_name, retry_count + 1)
-        else:
-            return {"error": error_msg}
+            if driver:
+                driver.quit()
+            return get_product_info_using_selenium(item_name, retry_count + 1)
+            
+    finally:
+        # Close the browser
+        if driver:
+            driver.quit()
+            
+    return product_info
 
-def process_excel_background(temp_file_path: str, batch_size: int = 10, job_id: str = None):
+def extract_product_details(driver):
+    """Extract product details from the product page"""
+    product_info = {
+        "title": "",
+        "description": "",
+        "image": "",
+        "url": driver.current_url,
+        "price": "",
+        "composition": "",
+        "discontinued": "",
+        "unspsc_code": "",
+        "dimensions": "",
+        "weight": "",
+        "manufacturer": "",
+        "asin": "",
+        "model_number": "",  
+        "country_of_origin": "",
+        "date_first_available": "",
+        "included_components": "",
+        "generic_name": ""
+    }
+    
+    # Extract title
+    try:
+        product_info["title"] = driver.find_element(By.ID, "productTitle").text.strip()
+        if product_info["title"] == "":
+            product_info["title"] = driver.find_element(By.ID, "title").text.strip()
+    except NoSuchElementException:
+        product_info["title"] = "NA"
+    
+    # Extract price
+    try:
+        price_element = driver.find_element(By.CSS_SELECTOR, ".a-price .a-offscreen")
+        product_info["price"] = price_element.get_attribute("innerHTML").strip()
+    except NoSuchElementException:
+        try:
+            price_element = driver.find_elements(By.CLASS_NAME, "a-price-whole")[0]
+            product_info["price"] = price_element.text.strip().replace("\n.", "")
+        except NoSuchElementException:
+            product_info["price"] = "NA"
+    
+    # Extract image URL
+    try:
+        img_element = driver.find_element(By.ID, "landingImage")
+        product_info["image"] = img_element.get_attribute("src")
+    except NoSuchElementException:
+        product_info["image"] = "NA"
+    
+    # Extract product description
+    try:
+        description_element = driver.find_element(By.ID, "productDescription")
+        product_info["description"] = description_element.text.strip()
+    except NoSuchElementException:
+        try:
+            description_element = driver.find_element(By.CSS_SELECTOR, "#feature-bullets .a-list-item")
+            product_info["description"] = "\n".join([item.text for item in driver.find_elements(By.CSS_SELECTOR, "#feature-bullets .a-list-item")])
+        except NoSuchElementException:
+            product_info["description"] = "NA"
+    
+    # Extract technical details from product information section
+    try:
+        # Look for the product details table
+        detail_sections = driver.find_elements(By.CSS_SELECTOR, "table.a-keyvalue")
+        
+        for section in detail_sections:
+            rows = section.find_elements(By.CSS_SELECTOR, "tr")
+            for row in rows:
+                try:
+                    key = row.find_element(By.CSS_SELECTOR, "th").text.strip().lower()
+                    value = row.find_element(By.CSS_SELECTOR, "td").text.strip()
+                    
+                    if "asin" in key:
+                        product_info["asin"] = value
+                    elif "manufacturer" in key:
+                        product_info["manufacturer"] = value
+                    elif "country of origin" in key:
+                        product_info["country_of_origin"] = value
+                    elif "date first available" in key:
+                        product_info["date_first_available"] = value
+                    elif "model" in key and "number" in key:
+                        product_info["model_number"] = value
+                    elif "item weight" in key or "weight" in key:
+                        product_info["weight"] = value
+                    elif "dimension" in key:
+                        product_info["dimensions"] = value
+                    elif "included" in key and "component" in key:
+                        product_info["included_components"] = value
+                    elif "generic name" in key:
+                        product_info["generic_name"] = value
+                    elif "composition" in key or "ingredients" in key:
+                        product_info["composition"] = value
+                except NoSuchElementException:
+                    continue
+    
+    except Exception as e:
+        print(f"Error extracting technical details: {str(e)}")
+    
+    # Check if product is discontinued
+    try:
+        if "currently unavailable" in driver.page_source.lower() or "we don't know when or if this item will be back in stock" in driver.page_source.lower():
+            product_info["discontinued"] = "Yes"
+        else:
+            product_info["discontinued"] = "No"
+    except:
+        product_info["discontinued"] = "NA"
+        
+    return product_info
+
+def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
     """Process Excel file in batches with regular status updates"""
     try:
         print(f"[{datetime.datetime.now()}] Starting job {job_id}: Reading Excel file")
@@ -131,8 +269,8 @@ def process_excel_background(temp_file_path: str, batch_size: int = 10, job_id: 
                     processed += 1
                     continue
 
-                # Get product info from Gemini API
-                product_info = get_product_info_from_gemini(name)
+                # Get product info using Selenium
+                product_info = get_product_info_using_selenium(name)
                 
                 # Create a flattened result dictionary with all the information
                 result = {
@@ -164,13 +302,15 @@ def process_excel_background(temp_file_path: str, batch_size: int = 10, job_id: 
                 progress_pct = (processed/total_products*100)
                 print(f"[{datetime.datetime.now()}] Job {job_id}: Progress {processed}/{total_products} ({progress_pct:.1f}%)")
                 
-                # Add a short delay between individual API calls
-                time.sleep(1)
+                # Add a longer delay between individual searches to avoid detection
+                wait_time = random.uniform(10, 20)
+                print(f"[{datetime.datetime.now()}] Job {job_id}: Waiting {wait_time:.1f} seconds before next item")
+                time.sleep(wait_time)
             
-            # Add a longer delay between batches to respect API rate limits
+            # Add an even longer delay between batches to respect rate limits
             if i + batch_size < total_products:
-                pause_time = 5
-                print(f"[{datetime.datetime.now()}] Job {job_id}: Batch {batch_num} complete. Pausing for {pause_time} seconds before next batch")
+                pause_time = random.uniform(30, 60)
+                print(f"[{datetime.datetime.now()}] Job {job_id}: Batch {batch_num} complete. Pausing for {pause_time:.1f} seconds before next batch")
                 time.sleep(pause_time)
         
         print(f"[{datetime.datetime.now()}] Job {job_id}: All products processed. Saving results to Excel")
@@ -222,7 +362,7 @@ async def upload_excel(background_tasks: BackgroundTasks, file: UploadFile = Fil
         print(f"[{datetime.datetime.now()}] New job created: {job_id} for file {file.filename}")
         
         # Start processing in background
-        background_tasks.add_task(process_excel_background, temp_file_path, batch_size=10, job_id=job_id)
+        background_tasks.add_task(process_excel_background, temp_file_path, batch_size=5, job_id=job_id)
         
         return {
             "job_id": job_id, 
