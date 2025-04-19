@@ -33,6 +33,15 @@ driver_executable_path = r"D:\FinalProject\product-dashboard\backend\extras\chro
 st = os.stat(driver_executable_path)
 os.chmod(driver_executable_path, st.st_mode | stat.S_IEXEC)
 
+def check_file_type(file_path: str):
+    """Check the file type of the uploaded file"""
+    if file_path.endswith('.xlsx'):
+        return "xlsx"
+    elif file_path.endswith('.csv'):
+        return "csv"
+    else:
+        return False
+
 def random_sleep(min_seconds=2, max_seconds=5):
     """Random sleep to mimic human behavior and avoid bot detection"""
     sleep_time = random.uniform(min_seconds, max_seconds)
@@ -199,6 +208,7 @@ def extract_product_details(driver):
         # Look for the product details table
         detail_sections = driver.find_elements(By.CSS_SELECTOR, "table.a-keyvalue")
         
+        # searching for the product details table in additional information section
         for section in detail_sections:
             rows = section.find_elements(By.CSS_SELECTOR, "tr")
             for row in rows:
@@ -228,7 +238,17 @@ def extract_product_details(driver):
                         product_info["composition"] = value
                 except NoSuchElementException:
                     continue
-    
+        
+        # searching for the product details table in product details section
+        detail_list = driver.find_element(By.ID, "detailBullets_feature_div")
+        list_items = detail_list.find_elements(By.TAG_NAME, "li")
+        detail_sections = "\n".join([item.text.strip() for item in list_items])
+        if detail_sections:
+            product_info["product_details_as_on_amazon.in"] = detail_sections
+        else:
+            product_info["product_details_as_on_amazon.in"] = "NA"
+                    
+
     except Exception as e:
         print(f"Error extracting technical details: {str(e)}")
     
@@ -243,11 +263,15 @@ def extract_product_details(driver):
         
     return product_info
 
-def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
+def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
     """Process Excel file in batches with regular status updates"""
     try:
-        print(f"[{datetime.datetime.now()}] Starting job {job_id}: Reading Excel file")
-        df = pd.read_excel(temp_file_path)
+        print(f"[{datetime.datetime.now()}] Starting job {job_id}: Reading file {temp_file_path}")
+        if "xlsx" in temp_file_path:
+            df = pd.read_excel(temp_file_path)
+        elif "csv" in temp_file_path:
+            df = pd.read_csv(temp_file_path)
+        
         total_products = len(df)
         results = []
         processed = 0
@@ -263,7 +287,10 @@ def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: s
             print(f"[{datetime.datetime.now()}] Job {job_id}: Processing batch {batch_num}/{total_batches}")
             
             for _, row in batch.iterrows():
+                srno = row.get("SrNo", "NA")
+                item_code = row.get("Item Code", "NA")
                 name = row.get("Item Name")
+                
                 if not name:
                     print(f"[{datetime.datetime.now()}] Job {job_id}: Skipping empty product name")
                     processed += 1
@@ -274,11 +301,13 @@ def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: s
                 
                 # Create a flattened result dictionary with all the information
                 result = {
+                    "SrNo": srno,
+                    "Item Code": item_code,
                     "Item Name": name,
                     "Title": product_info.get("title", ""),
-                    "Description": product_info.get("description", ""),
-                    "Composition": product_info.get("composition", ""),
+                    "Composition_on_amazon.in": product_info.get("description", ""),
                     "Price": product_info.get("price", ""),
+                    "Product Details as on amazon.in": product_info.get("product_details_as_on_amazon.in", ""),
                     "Image URL": product_info.get("image", ""),
                     "Amazon URL": product_info.get("url", ""),
                     "Is Discontinued": product_info.get("discontinued", ""),
@@ -314,8 +343,12 @@ def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: s
                 time.sleep(pause_time)
         
         print(f"[{datetime.datetime.now()}] Job {job_id}: All products processed. Saving results to Excel")
-        output = f"output_{job_id}.xlsx"
-        pd.DataFrame(results).to_excel(output, index=False)
+        if temp_file_path.endswith('.xlsx'):
+            output = f"output_{job_id}.xlsx"
+            pd.DataFrame(results).to_excel(output, index=False)
+        elif temp_file_path.endswith('.csv'):
+            output = f"output_{job_id}.csv"
+            pd.DataFrame(results).to_csv(output, index=False)
         
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["output_file"] = output
@@ -330,18 +363,23 @@ def process_excel_background(temp_file_path: str, batch_size: int = 5, job_id: s
         # Clean up the temporary file
         try:
             os.unlink(temp_file_path)
+            os.remove(temp_file_path)
             print(f"[{datetime.datetime.now()}] Job {job_id}: Temporary file cleaned up")
         except Exception as e:
             print(f"[{datetime.datetime.now()}] Job {job_id}: Failed to cleanup temporary file: {str(e)}")
 
 @app.post("/upload/")
-async def upload_excel(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Upload Excel file with product names for processing"""
+async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    """Upload Excel/CSV file with product names for processing"""
+    filetype = ""
     try:
         print(f"[{datetime.datetime.now()}] Received file upload: {file.filename}")
-        
+        filetype = check_file_type(file.filename)
+        if not filetype:
+            return JSONResponse(status_code=400, content={"error": "Unsupported file type"})
+
         # Create a temporary file to store the uploaded content
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.xlsx') as temp_file:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=f'.{filetype}') as temp_file:
             # Write the file content to the temporary file
             content = await file.read()
             temp_file.write(content)
@@ -362,7 +400,7 @@ async def upload_excel(background_tasks: BackgroundTasks, file: UploadFile = Fil
         print(f"[{datetime.datetime.now()}] New job created: {job_id} for file {file.filename}")
         
         # Start processing in background
-        background_tasks.add_task(process_excel_background, temp_file_path, batch_size=5, job_id=job_id)
+        background_tasks.add_task(process_file_background, temp_file_path, batch_size=5, job_id=job_id)
         
         return {
             "job_id": job_id, 

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
-import { API_ENDPOINTS, axiosConfig } from './api/config';
+import { axiosConfig } from './api/config';
 
 const AppContainer = styled.div`
   max-width: 800px;
@@ -219,7 +219,7 @@ function App() {
 
     try {
       const response = await axios.post(
-        API_ENDPOINTS.UPLOAD,
+        'http://localhost:8000/upload/',
         formData,
         axiosConfig
       );
@@ -242,14 +242,14 @@ function App() {
 
     const interval = setInterval(async () => {
       try {
-        const response = await axios.get(`${API_ENDPOINTS.STATUS}/${jobId}`);
+        const response = await axios.get(`http://localhost:8000/status/${jobId}`);
         const status = response.data;
         setJobStatus(status);
         setProgress(status.progress_percentage);
 
         if (status.status === 'completed') {
           clearInterval(interval);
-          setDownloadUrl(`${API_ENDPOINTS.DOWNLOAD}/${jobId}`);
+          setDownloadUrl(`http://localhost:8000/download/${jobId}`);
           setMessage('Processing completed! Your enhanced product data is ready for download.');
           setIsProcessing(false);
         } else if (status.status === 'failed') {
