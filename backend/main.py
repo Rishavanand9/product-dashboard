@@ -6,6 +6,8 @@ import stat
 import tempfile
 import datetime
 import random
+import logging
+import json
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from typing import Dict, List, Optional
@@ -25,6 +27,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Configure logging
+log_directory = "logs"
+if not os.path.exists(log_directory):
+    os.makedirs(log_directory)
+log_file = os.path.join(log_directory, f"amazon_scraper_{datetime.datetime.now().strftime('%Y%m%d')}.log")
+
+# Set up logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()  # Keep console output
+    ]
+)
+logger = logging.getLogger(__name__)
+
 
 # Global variables to track job status
 active_jobs: Dict[str, Dict] = {}
@@ -55,7 +75,7 @@ def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
     driver = None
     
     try:
-        print(f"[{datetime.datetime.now()}] Searching Amazon for product: {item_name}")
+        logger.info(f"Searching Amazon for product: {item_name}")
         
         # Configure Chrome options
         options = uc.ChromeOptions()
@@ -117,21 +137,22 @@ def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
             # Extract product information
             product_info = extract_product_details(driver)
             
-            print(f"[{datetime.datetime.now()}] Successfully scraped details for: {item_name}")
-            
+            logger.info(f"Successfully scraped details for: {item_name}")
+            logger.info(f"Product info: {json.dumps(product_info)}")
+
         except Exception as e:
-            print(f"[{datetime.datetime.now()}] Error finding or clicking first result: {str(e)}")
+            logger.error(f"Error finding or clicking first result: {str(e)}")
             product_info["error"] = f"Failed to find product results: {str(e)}"
             
     except Exception as e:
         error_msg = f"Selenium error: {str(e)}"
-        print(f"[{datetime.datetime.now()}] ERROR: {error_msg} for product: {item_name}")
+        logger.error(f"{error_msg} for product: {item_name}")
         product_info["error"] = error_msg
         
         # Retry logic
         if retry_count < max_retries:
             retry_delay = (retry_count + 1) * 5  # Exponential backoff
-            print(f"[{datetime.datetime.now()}] Retrying in {retry_delay} seconds (attempt {retry_count + 1}/{max_retries})...")
+            logger.info(f"Retrying in {retry_delay} seconds (attempt {retry_count + 1}/{max_retries})...")
             time.sleep(retry_delay)
             if driver:
                 driver.quit()
@@ -250,7 +271,7 @@ def extract_product_details(driver):
                     
 
     except Exception as e:
-        print(f"Error extracting technical details: {str(e)}")
+        logger.error(f"Error extracting technical details: {str(e)}")
     
     # Check if product is discontinued
     try:
@@ -266,7 +287,7 @@ def extract_product_details(driver):
 def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
     """Process Excel file in batches with regular status updates"""
     try:
-        print(f"[{datetime.datetime.now()}] Starting job {job_id}: Reading file {temp_file_path}")
+        logger.info(f"Starting job {job_id}: Reading file {temp_file_path}")
         if "xlsx" in temp_file_path:
             df = pd.read_excel(temp_file_path)
         elif "csv" in temp_file_path:
@@ -276,7 +297,7 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
         results = []
         processed = 0
         
-        print(f"[{datetime.datetime.now()}] Job {job_id}: Found {total_products} products to process")
+        logger.info(f"Job {job_id}: Found {total_products} products to process")
         active_jobs[job_id]["total"] = total_products
         
         # Process in batches
@@ -284,7 +305,7 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
             batch = df.iloc[i:i+batch_size]
             batch_num = i//batch_size + 1
             total_batches = (total_products-1)//batch_size + 1
-            print(f"[{datetime.datetime.now()}] Job {job_id}: Processing batch {batch_num}/{total_batches}")
+            logger.info(f"Job {job_id}: Processing batch {batch_num}/{total_batches}")
             
             for _, row in batch.iterrows():
                 srno = row.get("SrNo", "NA")
@@ -292,13 +313,13 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
                 name = row.get("Item Name")
                 
                 if not name:
-                    print(f"[{datetime.datetime.now()}] Job {job_id}: Skipping empty product name")
+                    logger.info(f"Job {job_id}: Skipping empty product name")
                     processed += 1
                     continue
 
                 # Get product info using Selenium
                 product_info = get_product_info_using_selenium(name)
-                
+
                 # Create a flattened result dictionary with all the information
                 result = {
                     "SrNo": srno,
@@ -329,51 +350,50 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
                 processed += 1
                 active_jobs[job_id]["processed"] = processed
                 progress_pct = (processed/total_products*100)
-                print(f"[{datetime.datetime.now()}] Job {job_id}: Progress {processed}/{total_products} ({progress_pct:.1f}%)")
+                logger.info(f"Job {job_id}: Progress {processed}/{total_products} ({progress_pct:.1f}%)")
                 
                 # Add a longer delay between individual searches to avoid detection
                 wait_time = random.uniform(10, 20)
-                print(f"[{datetime.datetime.now()}] Job {job_id}: Waiting {wait_time:.1f} seconds before next item")
+                logger.info(f"Job {job_id}: Waiting {wait_time:.1f} seconds before next item")
                 time.sleep(wait_time)
             
             # Add an even longer delay between batches to respect rate limits
             if i + batch_size < total_products:
                 pause_time = random.uniform(30, 60)
-                print(f"[{datetime.datetime.now()}] Job {job_id}: Batch {batch_num} complete. Pausing for {pause_time:.1f} seconds before next batch")
+                logger.info(f"Job {job_id}: Batch {batch_num} complete. Pausing for {pause_time:.1f} seconds before next batch")
                 time.sleep(pause_time)
         
-        print(f"[{datetime.datetime.now()}] Job {job_id}: All products processed. Saving results to Excel")
+        logger.info(f"Job {job_id}: All products processed. Saving results to Excel")
         if temp_file_path.endswith('.xlsx'):
-            output = f"output_{job_id}.xlsx"
-            pd.DataFrame(results).to_excel(output, index=False)
+            output_path = os.path.join(os.path.dirname(__file__), "output_files", f"output_{job_id}.xlsx")
+            pd.DataFrame(results).to_excel(output_path, index=False)
         elif temp_file_path.endswith('.csv'):
-            output = f"output_{job_id}.csv"
-            pd.DataFrame(results).to_csv(output, index=False)
+            output_path = os.path.join(os.path.dirname(__file__), "output_files", f"output_{job_id}.csv")
+            pd.DataFrame(results).to_csv(output_path, index=False)
         
         active_jobs[job_id]["status"] = "completed"
-        active_jobs[job_id]["output_file"] = output
-        print(f"[{datetime.datetime.now()}] Job {job_id}: Job completed successfully")
+        active_jobs[job_id]["output_file"] = output_path
+        logger.info(f"Job {job_id}: Job completed successfully")
         
     except Exception as e:
         error_msg = f"Error processing Excel: {str(e)}"
-        print(f"[{datetime.datetime.now()}] Job {job_id}: ERROR: {error_msg}")
+        logger.error(f"{error_msg}")
         active_jobs[job_id]["status"] = "failed"
         active_jobs[job_id]["error"] = error_msg
     finally:
         # Clean up the temporary file
         try:
             os.unlink(temp_file_path)
-            os.remove(temp_file_path)
-            print(f"[{datetime.datetime.now()}] Job {job_id}: Temporary file cleaned up")
+            logger.info(f"Job {job_id}: Temporary file cleaned up")
         except Exception as e:
-            print(f"[{datetime.datetime.now()}] Job {job_id}: Failed to cleanup temporary file: {str(e)}")
+            logger.error(f"Job {job_id}: Failed to cleanup temporary file: {str(e)}")
 
 @app.post("/upload/")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """Upload Excel/CSV file with product names for processing"""
     filetype = ""
     try:
-        print(f"[{datetime.datetime.now()}] Received file upload: {file.filename}")
+        logger.info(f"Received file upload: {file.filename}")
         filetype = check_file_type(file.filename)
         if not filetype:
             return JSONResponse(status_code=400, content={"error": "Unsupported file type"})
@@ -396,8 +416,9 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
             "start_time": datetime.datetime.now().isoformat(),
             "file_name": file.filename
         }
-        
-        print(f"[{datetime.datetime.now()}] New job created: {job_id} for file {file.filename}")
+
+        logger.info(f"Active jobs: {active_jobs}")
+        logger.info(f"New job created: {job_id} for file {file.filename}")
         
         # Start processing in background
         background_tasks.add_task(process_file_background, temp_file_path, batch_size=5, job_id=job_id)
@@ -408,7 +429,7 @@ async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File
         }
     except Exception as e:
         error_msg = f"Error handling upload: {str(e)}"
-        print(f"[{datetime.datetime.now()}] ERROR: {error_msg}")
+        logger.error(f"{error_msg}")
         return JSONResponse(status_code=500, content={"error": error_msg})
 
 @app.get("/status/{job_id}")
@@ -455,7 +476,7 @@ async def download_results(job_id: str):
     if not output_file or not os.path.exists(output_file):
         return JSONResponse(status_code=404, content={"error": "Output file not found"})
     
-    print(f"[{datetime.datetime.now()}] Sending results file for job {job_id}: {output_file}")
+    logger.info(f"Sending results file for job {job_id}: {output_file}")
     return FileResponse(output_file, filename=f"amazon_results_{job_id}.xlsx")
 
 @app.get("/jobs")

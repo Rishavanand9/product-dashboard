@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import styled from 'styled-components';
 import axios from 'axios';
 import { axiosConfig } from './api/config';
+import JobsTable from './JobsTable';
 
 const AppContainer = styled.div`
-  max-width: 800px;
+  max-width: 80%;
   margin: 0 auto;
   padding: 2rem;
   font-family: 'Arial', sans-serif;
@@ -85,6 +86,29 @@ const DownloadButton = styled.button`
 
   &:hover {
     background-color: #d32f2f;
+  }
+`;
+
+const ResetButton = styled.button`
+  background-color:rgb(87, 95, 91);
+  color: white;
+  margin-left: 1rem;
+  padding: 0.75rem 1.5rem;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.3s;
+  margin-top: 1rem;
+  width: 200px;
+
+  &:hover {
+    background-color:rgba(35, 37, 36, 0.87);
+  }
+
+  &:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
   }
 `;
 
@@ -171,6 +195,27 @@ const AcceptedFormats = styled.div`
   margin-top: 0.5rem;
 `;
 
+const TabContainer = styled.div`
+  display: flex;
+  margin-bottom: 1rem;
+  width: 100%;
+`;
+
+const Tab = styled.button`
+  padding: 0.75rem 1.5rem;
+  border: none;
+  background-color: ${props => props.active ? '#4285f4' : '#f1f3f4'};
+  color: ${props => props.active ? 'white' : '#333'};
+  cursor: pointer;
+  font-size: 1rem;
+  border-radius: 4px 4px 0 0;
+  margin-right: 0.5rem;
+  
+  &:hover {
+    background-color: ${props => props.active ? '#4285f4' : '#e0e0e0'};
+  }
+`;
+
 function App() {
   const [file, setFile] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -180,12 +225,14 @@ function App() {
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [jobStatus, setJobStatus] = useState(null);
   const [statusCheckInterval, setStatusCheckInterval] = useState(null);
+  const [activeTab, setActiveTab] = useState('upload');
+  const [jobs, setJobs] = useState({});
 
   const handleFileChange = (e) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
       // Validate file type
-      const validTypes = ['.csv', '.xlsx', '.xls'];
+      const validTypes = ['.csv', '.xlsx'];
       const fileExtension = selectedFile.name.toLowerCase().slice(selectedFile.name.lastIndexOf('.'));
       
       if (!validTypes.includes(fileExtension)) {
@@ -287,82 +334,147 @@ function App() {
     }
   };
 
+  // Function to fetch all jobs
+  const fetchJobs = async () => {
+    try {
+      const response = await axios.get('http://localhost:8000/jobs/', axiosConfig);
+      setJobs(response.data);
+    } catch (error) {
+      console.error('Error fetching jobs:', error);
+    }
+  };
+
+  // Fetch jobs when the jobs tab is selected
+  useEffect(() => {
+    if (activeTab === 'jobs') {
+      fetchJobs();
+      const interval = setInterval(fetchJobs, 5000); // Refresh every 5 seconds
+      return () => clearInterval(interval);
+    }
+  }, [activeTab]);
+
+  const resetForm = () => {
+    setFile(null);
+    setIsProcessing(false);
+    setMessage('');
+    setError(false);
+    setProgress(0);
+    setDownloadUrl(null);
+    setJobStatus(null);
+    
+    if (statusCheckInterval) {
+      clearInterval(statusCheckInterval);
+      setStatusCheckInterval(null);
+    }
+    
+    // Reset file input
+    const fileInput = document.getElementById('file-upload');
+    if (fileInput) fileInput.value = '';
+  };
+
   return (
     <AppContainer>
       <Header>
         <Title>Amazon Product Details Enhancer</Title>
       </Header>
       
-      <UploadSection>
-        <HiddenFileInput 
-          type="file" 
-          id="file-upload" 
-          accept=".csv,.xlsx,.xls" 
-          onChange={handleFileChange} 
-        />
-        <FileLabel htmlFor="file-upload">
-          Select Excel/CSV File
-        </FileLabel>
-        
-        <AcceptedFormats>
-          Accepted formats: .xlsx, .xls, .csv
-        </AcceptedFormats>
-        
-        {file && (
-          <FileInfo>
-            <strong>File:</strong> {file.name}
-            <br />
-            <strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB
-          </FileInfo>
-        )}
-        
-        {file && !isProcessing && !downloadUrl && (
-          <div>
-            <ProcessButton onClick={processFile} disabled={isProcessing}>
-              Enhance Product Details
-            </ProcessButton>
-          </div>
-        )}
-        
-        {isProcessing && jobStatus && (
-          <div>
-            <ProgressContainer>
-              <ProgressBar progress={progress} />
-            </ProgressContainer>
+      <TabContainer>
+        <Tab 
+          active={activeTab === 'upload'} 
+          onClick={() => setActiveTab('upload')}
+        >
+          Upload Product File
+        </Tab>
+        <Tab 
+          active={activeTab === 'jobs'} 
+          onClick={() => setActiveTab('jobs')}
+        >
+          Your Jobs
+        </Tab>
+      </TabContainer>
+      
+      {activeTab === 'upload' && (
+        <UploadSection>
+          <HiddenFileInput 
+            type="file" 
+            id="file-upload" 
+            accept=".csv,.xlsx" 
+            onChange={handleFileChange} 
+          />
+          <FileLabel htmlFor="file-upload">
+            Select Excel/CSV File
+          </FileLabel>
+          
+          <AcceptedFormats>
+            Accepted formats: .xlsx, .csv
+          </AcceptedFormats>
+          
+          {file && (
+            <FileInfo>
+              <strong>File:</strong> {file.name}
+              <br />
+              <strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB
+            </FileInfo>
+          )}
+          
+          {file && !isProcessing && !downloadUrl && (
+            <div>
+              <ProcessButton onClick={processFile} disabled={isProcessing}>
+                Enhance Product Details
+              </ProcessButton>
+              <ResetButton onClick={resetForm}>
+                Reset
+              </ResetButton>
+            </div>
+          )}
+          
+          {isProcessing && jobStatus && (
+            <div>
+              <ProgressContainer>
+                <ProgressBar progress={progress} />
+              </ProgressContainer>
+              <StatusContainer>
+                <StatusIcon processing />
+                <StatusMessage>
+                  {message}
+                  <ElapsedTime>
+                    Time elapsed: {jobStatus.elapsed_formatted}
+                  </ElapsedTime>
+                </StatusMessage>
+              </StatusContainer>
+            </div>
+          )}
+          
+          {downloadUrl && (
+            <div>
+              <StatusContainer>
+                <StatusIcon success />
+                <StatusMessage>{message}</StatusMessage>
+              </StatusContainer>
+              <DownloadButton onClick={downloadFile}>
+                Download Enhanced Product Data
+              </DownloadButton>
+              <ResetButton onClick={resetForm}>
+                Reset
+              </ResetButton>
+            </div>
+          )}
+          
+          {error && (
             <StatusContainer>
-              <StatusIcon processing />
-              <StatusMessage>
-                {message}
-                <ElapsedTime>
-                  Time elapsed: {jobStatus.elapsed_formatted}
-                </ElapsedTime>
-              </StatusMessage>
+              <StatusIcon error />
+              <StatusMessage error>{message}</StatusMessage>
+              {jobStatus?.error && (
+                <ErrorDetails>{jobStatus.error}</ErrorDetails>
+              )}
             </StatusContainer>
-          </div>
-        )}
-        
-        {downloadUrl && (
-          <div>
-            <StatusContainer>
-              <StatusIcon success />
-              <StatusMessage>{message}</StatusMessage>
-            </StatusContainer>
-            <DownloadButton onClick={downloadFile}>
-              Download Enhanced Product Data
-            </DownloadButton>
-          </div>
-        )}
-        
-        {error && (
-          <StatusContainer>
-            <StatusIcon error />
-            <StatusMessage error>{message}</StatusMessage>
-            {jobStatus?.error && (
-              <ErrorDetails>{jobStatus.error}</ErrorDetails>
-            )}
-          </StatusContainer>
-        )}
-      </UploadSection>
+          )}
+        </UploadSection>
+      )}
+      
+      {activeTab === 'jobs' && (
+        <JobsTable jobs={jobs} onRefresh={fetchJobs} />
+      )}
     </AppContainer>
   );
 }
