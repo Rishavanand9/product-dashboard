@@ -13,6 +13,8 @@ report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
 venv/
 __pycache__/
 extras/
+output_files/
+logs/
 
 # Runtime data
 pids
