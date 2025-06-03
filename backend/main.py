@@ -8,6 +8,8 @@ import datetime
 import random
 import logging
 import json
+import requests
+import platform
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.responses import FileResponse, JSONResponse
 from typing import Dict, List, Optional
@@ -17,6 +19,15 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from PIL import Image as PILImage
+
+# Changes 03062025
+import openpyxl
+from openpyxl.drawing.image import Image as OpenpyxlImage
+import requests
+from io import BytesIO
+
+
 
 app = FastAPI()
 
@@ -37,7 +48,7 @@ log_file = os.path.join(log_directory, f"amazon_scraper_{datetime.datetime.now()
 # Set up logger
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
+    format='%(asctime)s - %(levelname)s - %(lineno)s - %(funcName)20s() - %(message)s',
     handlers=[
         logging.FileHandler(log_file),
         logging.StreamHandler()  # Keep console output
@@ -45,6 +56,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def updated_chromedriver(options):
+
+    if platform.system() == "Windows":
+        dynamic_link = r"backend\extras\links.json"
+    elif platform.system() == "Linux":
+        dynamic_link = r"backend/extras/links.json"
+    else:
+        logger.error("Unsupported OS for chromedriver update")
+        raise Exception("Unsupported OS for chromedriver update")
+    
+    with open(dynamic_link, 'r') as f:
+        links = json.load(f)
+    driver_link = links.get("chromedriver")
+    if not driver_link:
+        logger.error("No chromedriver link found in links.json")
+        raise Exception("No chromedriver link found in links.json")
+    logger.info(f"Updating chromedriver from {driver_link}")
+    try:
+        response = requests.get(driver_link, timeout=10)
+        if response.status_code == 200:
+            # Save the driver to a temporary file
+            temp_driver_path = os.path.join(tempfile.gettempdir(), "chromedriver")
+            with open(temp_driver_path, 'wb') as f:
+                f.write(response.content)
+            
+            # Set executable permissions
+            st = os.stat(temp_driver_path)
+            os.chmod(temp_driver_path, st.st_mode | stat.S_IEXEC)
+            
+            # Initialize undetected_chromedriver with the new driver
+            driver = uc.Chrome(options=options, browser_executable_path=temp_driver_path)
+            logger.info("Successfully updated and initialized undetected_chromedriver")
+            return driver
+        else:
+            logger.error(f"Failed to download chromedriver: Status {response.status_code}")
+            raise Exception(f"Failed to download chromedriver: Status {response.status_code}")
+    except Exception as e:
+        logger.error(f"Error updating chromedriver: {str(e)}")
+        raise Exception(f"Error updating chromedriver: {str(e)}")
 
 # Global variables to track job status
 active_jobs: Dict[str, Dict] = {}
@@ -62,11 +113,28 @@ def check_file_type(file_path: str):
     else:
         return False
 
-def random_sleep(min_seconds=2, max_seconds=5):
+def random_sleep(min_seconds=1, max_seconds=3):
     """Random sleep to mimic human behavior and avoid bot detection"""
     sleep_time = random.uniform(min_seconds, max_seconds)
     time.sleep(sleep_time)
     return sleep_time
+
+# Changes 03062025
+def download_image(image_url: str, temp_dir: str, index: int, job_id: str) -> Optional[str]:
+    """Download an image from a URL and save it temporarily"""
+    try:
+        response = requests.get(image_url, timeout=10)
+        if response.status_code == 200:
+            image_path = os.path.join(temp_dir, f"image_{job_id}_{index}.jpg")
+            with open(image_path, 'wb') as f:
+                f.write(response.content)
+            return image_path
+        else:
+            logger.warning(f"Failed to download image from {image_url}: Status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error downloading image {image_url}: {str(e)}")
+        return None
 
 def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
     """Get detailed product information using Selenium with retry mechanism"""
@@ -84,8 +152,16 @@ def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
         options.add_argument('--disable-dev-shm-usage')
         
         # Initialize undetected chromedriver
-        driver = uc.Chrome(options=options, browser_executable_path=driver_executable_path)
+        try:
+            driver = uc.Chrome(options=options, browser_executable_path=driver_executable_path)
+        except Exception as e:
+            if str(e).__contains__("This version of ChromeDriver only supports Chrome version"):
+                driver = updated_chromedriver(options)
+                
+            logger.error(f"Failed to initialize undetected_chromedriver: {str(e)}")
+            return {"error": f"Failed to initialize browser: {str(e)}"}
         
+
         # Add random user agent through undetected_chromedriver config
         
         # Go to Amazon.in
@@ -171,6 +247,7 @@ def extract_product_details(driver):
         "title": "",
         "description": "",
         "image": "",
+       "image_urls": [],  # Changed from 'image' to 'image_urls' for multiple images
         "url": driver.current_url,
         "price": "",
         "composition": "",
@@ -212,6 +289,20 @@ def extract_product_details(driver):
         product_info["image"] = img_element.get_attribute("src")
     except NoSuchElementException:
         product_info["image"] = "NA"
+
+
+    # Extract multiple image URLs
+    try:
+        # Target the image thumbnail carousel
+        img_elements = driver.find_elements(By.CSS_SELECTOR, ".imageThumbnail img, #altImages img, #main-image-container img")
+        image_urls = []
+        for img in img_elements[:5]:  # Limit to 5 images to avoid overwhelming
+            src = img.get_attribute("src")
+            if src and src not in image_urls:
+                image_urls.append(src)
+        product_info["image_urls"] = image_urls if image_urls else ["NA"]
+    except NoSuchElementException:
+        product_info["image_urls"] = ["NA"]
     
     # Extract product description
     try:
@@ -283,9 +374,20 @@ def extract_product_details(driver):
         product_info["discontinued"] = "NA"
         
     return product_info
+def download_image_in_memory(image_url: str) -> Optional[BytesIO]:
+    """Download an image from a URL and return it as a BytesIO object"""
+    try:
+        response = requests.get(image_url, timeout=10)
+        if response.status_code == 200:
+            return BytesIO(response.content)
+        else:
+            logger.warning(f"Failed to download image from {image_url}: Status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error downloading image {image_url}: {str(e)}")
+        return None
 
 def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
-    """Process Excel file in batches with regular status updates"""
     try:
         logger.info(f"Starting job {job_id}: Reading file {temp_file_path}")
         if "xlsx" in temp_file_path:
@@ -299,7 +401,7 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
         
         logger.info(f"Job {job_id}: Found {total_products} products to process")
         active_jobs[job_id]["total"] = total_products
-        
+
         # Process in batches
         for i in range(0, total_products, batch_size):
             batch = df.iloc[i:i+batch_size]
@@ -330,6 +432,7 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
                     "Price": product_info.get("price", ""),
                     "Product Details as on amazon.in": product_info.get("product_details_as_on_amazon.in", ""),
                     "Image URL": product_info.get("image", ""),
+                    "Image URLs": product_info.get("image_urls", []),  # List for multiple images
                     "Amazon URL": product_info.get("url", ""),
                     "Is Discontinued": product_info.get("discontinued", ""),
                     "UNSPSC Code": product_info.get("unspsc_code", ""),
@@ -352,25 +455,70 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
                 progress_pct = (processed/total_products*100)
                 logger.info(f"Job {job_id}: Progress {processed}/{total_products} ({progress_pct:.1f}%)")
                 
-                # Add a longer delay between individual searches to avoid detection
                 wait_time = random.uniform(10, 20)
                 logger.info(f"Job {job_id}: Waiting {wait_time:.1f} seconds before next item")
                 time.sleep(wait_time)
             
-            # Add an even longer delay between batches to respect rate limits
             if i + batch_size < total_products:
                 pause_time = random.uniform(30, 60)
                 logger.info(f"Job {job_id}: Batch {batch_num} complete. Pausing for {pause_time:.1f} seconds before next batch")
                 time.sleep(pause_time)
         
-        logger.info(f"Job {job_id}: All products processed. Saving results to Excel")
-        if temp_file_path.endswith('.xlsx'):
-            output_path = os.path.join(os.path.dirname(__file__), "output_files", f"output_{job_id}.xlsx")
-            pd.DataFrame(results).to_excel(output_path, index=False)
-        elif temp_file_path.endswith('.csv'):
-            output_path = os.path.join(os.path.dirname(__file__), "output_files", f"output_{job_id}.csv")
-            pd.DataFrame(results).to_csv(output_path, index=False)
+        logger.info(f"Job {job_id}: All products processed. Saving results to output")
+        output_dir = os.path.join(os.path.dirname(__file__), "output_files")
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         
+        output_path = os.path.join(output_dir, f"output_{job_id}.xlsx")
+        
+        if temp_file_path.endswith('.xlsx'):
+            # Save to Excel
+            df_results = pd.DataFrame(results)
+            df_results.to_excel(output_path, index=False)
+            
+            # Load workbook to add images
+            wb = openpyxl.load_workbook(output_path)
+            ws = wb.active
+            
+            # Adjust column width and row height
+            ws.column_dimensions['I'].width = 50  # Image URLs column
+            ws.column_dimensions['J'].width = 20  # Embedded Images column
+            for row in range(2, ws.max_row + 1):
+                ws.row_dimensions[row].height = 100  # Adjust row height for images
+            
+            # Add header for image column
+            ws['J1'] = "Embedded Images"
+            
+            # Embed images
+            for row_idx, result in enumerate(results, start=2):
+                if len(result["Image URLs"]) == 1 and result["Image URLs"][0] == "NA":
+                    logger.info(f"Job {job_id}: No images to embed for row {row_idx}")
+                    continue
+                image_urls = result["Image URLs"]
+                for idx, url in enumerate(image_urls[:5]):  # Limit to 5 images
+                    if url != "NA":
+                        image_data = download_image_in_memory(url)
+                        if image_data:
+                            try:
+                                # Open image with PIL and convert to a format openpyxl can use
+                                pil_img = PILImage.open(image_data)
+                                # Resize image (optional, adjust as needed)
+                                # pil_img = pil_img.resize((100, 100), PILImage.Resampling.LANCZOS)
+                                # Save to BytesIO in a compatible format (PNG)
+                                img_buffer = BytesIO()
+                                pil_img.save(img_buffer, format="PNG")
+                                img_buffer.seek(0)
+                                # Embed in Excel
+                                img = OpenpyxlImage(img_buffer)
+                                ws.add_image(img, f"J{row_idx}")
+                            except Exception as e:
+                                logger.error(f"Failed to embed image {url} for row {row_idx}: {str(e)}")
+            
+            wb.save(output_path)
+        elif temp_file_path.endswith('.csv'):
+            pd.DataFrame(results).to_csv(output_path.replace('.xlsx', '.csv'), index=False)
+            logger.warning(f"Job {job_id}: CSV output does not support image embedding")
+
         active_jobs[job_id]["status"] = "completed"
         active_jobs[job_id]["output_file"] = output_path
         logger.info(f"Job {job_id}: Job completed successfully")

@@ -412,8 +412,8 @@ function App() {
           {file && (
             <FileInfo>
               <strong>File:</strong> {file.name}
-              <br />
-              <strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB
+              {/* <br /> */}
+              {/* <strong>Size:</strong> {(file.size / 1024 / 1024).toFixed(2)} MB */}
             </FileInfo>
           )}
           
