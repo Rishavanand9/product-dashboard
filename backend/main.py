@@ -15,17 +15,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from typing import Dict, List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 import undetected_chromedriver as uc
+from PIL import Image as PILImage
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException
-from PIL import Image as PILImage
-
-# Changes 03062025
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, WebDriverException
+import undetected_chromedriver as uc
+from io import BytesIO
 import openpyxl
 from openpyxl.drawing.image import Image as OpenpyxlImage
-import requests
-from io import BytesIO
+import re
+import ast
 
 
 
@@ -118,274 +118,6 @@ def random_sleep(min_seconds=1, max_seconds=3):
     sleep_time = random.uniform(min_seconds, max_seconds)
     time.sleep(sleep_time)
     return sleep_time
-
-# Changes 03062025
-def download_image(image_url: str, temp_dir: str, index: int, job_id: str) -> Optional[str]:
-    """Download an image from a URL and save it temporarily"""
-    try:
-        response = requests.get(image_url, timeout=10)
-        if response.status_code == 200:
-            image_path = os.path.join(temp_dir, f"image_{job_id}_{index}.jpg")
-            with open(image_path, 'wb') as f:
-                f.write(response.content)
-            return image_path
-        else:
-            logger.warning(f"Failed to download image from {image_url}: Status {response.status_code}")
-            return None
-    except Exception as e:
-        logger.error(f"Error downloading image {image_url}: {str(e)}")
-        return None
-
-def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
-    """Get detailed product information using Selenium with retry mechanism"""
-    max_retries = 3
-    product_info = {}
-    driver = None
-    
-    try:
-        logger.info(f"Searching Amazon for product: {item_name}")
-        
-        # Configure Chrome options
-        options = uc.ChromeOptions()
-        options.add_argument('--headless')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        
-        # Initialize undetected chromedriver
-        try:
-            driver = uc.Chrome(options=options, browser_executable_path=driver_executable_path)
-        except Exception as e:
-            if str(e).__contains__("This version of ChromeDriver only supports Chrome version"):
-                driver = updated_chromedriver(options)
-                
-            logger.error(f"Failed to initialize undetected_chromedriver: {str(e)}")
-            return {"error": f"Failed to initialize browser: {str(e)}"}
-        
-
-        # Add random user agent through undetected_chromedriver config
-        
-        # Go to Amazon.in
-        driver.get("https://www.amazon.in")
-        
-        random_sleep(3, 6)
-        
-        # Accept cookies if present
-        try:
-            cookie_button = WebDriverWait(driver, 5).until(
-                EC.element_to_be_clickable((By.ID, "sp-cc-accept"))
-            )
-            cookie_button.click()
-            random_sleep(1, 3)
-        except TimeoutException:
-            # Cookie dialog might not appear
-            pass
-        
-        # Search for the product
-        search_box = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.ID, "twotabsearchtextbox"))
-        )
-        search_box.clear()
-        # Type like a human - letter by letter with random delays
-        for char in item_name:
-            search_box.send_keys(char)
-            time.sleep(random.uniform(0.05, 0.2))
-        
-        search_button = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((By.ID, "nav-search-submit-button"))
-        )
-        search_button.click()
-        
-        random_sleep(3, 7)
-        
-        # Click on the first search result
-        try:
-            first_result = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.CSS_SELECTOR, "div.s-result-item[data-component-type='s-search-result'] img"))
-            )
-            first_result.click()
-            
-            # Switch to the new tab if opened
-            if len(driver.window_handles) > 1:
-                driver.switch_to.window(driver.window_handles[1])
-                
-            random_sleep(4, 8)
-            
-            # Extract product information
-            product_info = extract_product_details(driver)
-            
-            logger.info(f"Successfully scraped details for: {item_name}")
-            logger.info(f"Product info: {json.dumps(product_info)}")
-
-        except Exception as e:
-            logger.error(f"Error finding or clicking first result: {str(e)}")
-            product_info["error"] = f"Failed to find product results: {str(e)}"
-            
-    except Exception as e:
-        error_msg = f"Selenium error: {str(e)}"
-        logger.error(f"{error_msg} for product: {item_name}")
-        product_info["error"] = error_msg
-        
-        # Retry logic
-        if retry_count < max_retries:
-            retry_delay = (retry_count + 1) * 5  # Exponential backoff
-            logger.info(f"Retrying in {retry_delay} seconds (attempt {retry_count + 1}/{max_retries})...")
-            time.sleep(retry_delay)
-            if driver:
-                driver.quit()
-            return get_product_info_using_selenium(item_name, retry_count + 1)
-            
-    finally:
-        # Close the browser
-        if driver:
-            driver.quit()
-            
-    return product_info
-
-def extract_product_details(driver):
-    """Extract product details from the product page"""
-    product_info = {
-        "title": "",
-        "description": "",
-        "image": "",
-       "image_urls": [],  # Changed from 'image' to 'image_urls' for multiple images
-        "url": driver.current_url,
-        "price": "",
-        "composition": "",
-        "discontinued": "",
-        "unspsc_code": "",
-        "dimensions": "",
-        "weight": "",
-        "manufacturer": "",
-        "asin": "",
-        "model_number": "",  
-        "country_of_origin": "",
-        "date_first_available": "",
-        "included_components": "",
-        "generic_name": ""
-    }
-    
-    # Extract title
-    try:
-        product_info["title"] = driver.find_element(By.ID, "productTitle").text.strip()
-        if product_info["title"] == "":
-            product_info["title"] = driver.find_element(By.ID, "title").text.strip()
-    except NoSuchElementException:
-        product_info["title"] = "NA"
-    
-    # Extract price
-    try:
-        price_element = driver.find_element(By.CSS_SELECTOR, ".a-price .a-offscreen")
-        product_info["price"] = price_element.get_attribute("innerHTML").strip()
-    except NoSuchElementException:
-        try:
-            price_element = driver.find_elements(By.CLASS_NAME, "a-price-whole")[0]
-            product_info["price"] = price_element.text.strip().replace("\n.", "")
-        except NoSuchElementException:
-            product_info["price"] = "NA"
-    
-    # Extract image URL
-    try:
-        img_element = driver.find_element(By.ID, "landingImage")
-        product_info["image"] = img_element.get_attribute("src")
-    except NoSuchElementException:
-        product_info["image"] = "NA"
-
-
-    # Extract multiple image URLs
-    try:
-        # Target the image thumbnail carousel
-        img_elements = driver.find_elements(By.CSS_SELECTOR, ".imageThumbnail img, #altImages img, #main-image-container img")
-        image_urls = []
-        for img in img_elements[:5]:  # Limit to 5 images to avoid overwhelming
-            src = img.get_attribute("src")
-            if src and src not in image_urls:
-                image_urls.append(src)
-        product_info["image_urls"] = image_urls if image_urls else ["NA"]
-    except NoSuchElementException:
-        product_info["image_urls"] = ["NA"]
-    
-    # Extract product description
-    try:
-        description_element = driver.find_element(By.ID, "productDescription")
-        product_info["description"] = description_element.text.strip()
-    except NoSuchElementException:
-        try:
-            description_element = driver.find_element(By.CSS_SELECTOR, "#feature-bullets .a-list-item")
-            product_info["description"] = "\n".join([item.text for item in driver.find_elements(By.CSS_SELECTOR, "#feature-bullets .a-list-item")])
-        except NoSuchElementException:
-            product_info["description"] = "NA"
-    
-    # Extract technical details from product information section
-    try:
-        # Look for the product details table
-        detail_sections = driver.find_elements(By.CSS_SELECTOR, "table.a-keyvalue")
-        
-        # searching for the product details table in additional information section
-        for section in detail_sections:
-            rows = section.find_elements(By.CSS_SELECTOR, "tr")
-            for row in rows:
-                try:
-                    key = row.find_element(By.CSS_SELECTOR, "th").text.strip().lower()
-                    value = row.find_element(By.CSS_SELECTOR, "td").text.strip()
-                    
-                    if "asin" in key:
-                        product_info["asin"] = value
-                    elif "manufacturer" in key:
-                        product_info["manufacturer"] = value
-                    elif "country of origin" in key:
-                        product_info["country_of_origin"] = value
-                    elif "date first available" in key:
-                        product_info["date_first_available"] = value
-                    elif "model" in key and "number" in key:
-                        product_info["model_number"] = value
-                    elif "item weight" in key or "weight" in key:
-                        product_info["weight"] = value
-                    elif "dimension" in key:
-                        product_info["dimensions"] = value
-                    elif "included" in key and "component" in key:
-                        product_info["included_components"] = value
-                    elif "generic name" in key:
-                        product_info["generic_name"] = value
-                    elif "composition" in key or "ingredients" in key:
-                        product_info["composition"] = value
-                except NoSuchElementException:
-                    continue
-        
-        # searching for the product details table in product details section
-        detail_list = driver.find_element(By.ID, "detailBullets_feature_div")
-        list_items = detail_list.find_elements(By.TAG_NAME, "li")
-        detail_sections = "\n".join([item.text.strip() for item in list_items])
-        if detail_sections:
-            product_info["product_details_as_on_amazon.in"] = detail_sections
-        else:
-            product_info["product_details_as_on_amazon.in"] = "NA"
-                    
-
-    except Exception as e:
-        logger.error(f"Error extracting technical details: {str(e)}")
-    
-    # Check if product is discontinued
-    try:
-        if "currently unavailable" in driver.page_source.lower() or "we don't know when or if this item will be back in stock" in driver.page_source.lower():
-            product_info["discontinued"] = "Yes"
-        else:
-            product_info["discontinued"] = "No"
-    except:
-        product_info["discontinued"] = "NA"
-        
-    return product_info
-def download_image_in_memory(image_url: str) -> Optional[BytesIO]:
-    """Download an image from a URL and return it as a BytesIO object"""
-    try:
-        response = requests.get(image_url, timeout=10)
-        if response.status_code == 200:
-            return BytesIO(response.content)
-        else:
-            logger.warning(f"Failed to download image from {image_url}: Status {response.status_code}")
-            return None
-    except Exception as e:
-        logger.error(f"Error downloading image {image_url}: {str(e)}")
-        return None
 
 def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: str = None):
     try:
@@ -480,39 +212,51 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
             wb = openpyxl.load_workbook(output_path)
             ws = wb.active
             
-            # Adjust column width and row height
-            ws.column_dimensions['I'].width = 50  # Image URLs column
-            ws.column_dimensions['J'].width = 20  # Embedded Images column
-            for row in range(2, ws.max_row + 1):
-                ws.row_dimensions[row].height = 100  # Adjust row height for images
+            # Determine the starting column for images (after existing columns)
+            base_columns = list(df_results.columns)
+            image_start_col_idx = len(base_columns) + 1  # 1-based index for openpyxl
             
-            # Add header for image column
-            ws['J1'] = "Embedded Images"
+            # Define maximum number of images per product
+            max_images = 10
+            image_col_width = 20  # Width in Excel units (~pixels / 7)
+            image_row_height = 100  # Height in points (~pixels * 0.75)
+            
+            # Add headers for image columns
+            for i in range(max_images):
+                col_letter = openpyxl.utils.get_column_letter(image_start_col_idx + i)
+                ws[f"{col_letter}1"] = f"Image {i+1}"
+                ws.column_dimensions[col_letter].width = image_col_width
+            
+            # Adjust row heights for all data rows
+            for row in range(2, ws.max_row + 1):
+                ws.row_dimensions[row].height = image_row_height
             
             # Embed images
             for row_idx, result in enumerate(results, start=2):
-                if len(result["Image URLs"]) == 1 and result["Image URLs"][0] == "NA":
-                    logger.info(f"Job {job_id}: No images to embed for row {row_idx}")
-                    continue
                 image_urls = result["Image URLs"]
-                for idx, url in enumerate(image_urls[:5]):  # Limit to 5 images
-                    if url != "NA":
-                        image_data = download_image_in_memory(url)
-                        if image_data:
-                            try:
-                                # Open image with PIL and convert to a format openpyxl can use
-                                pil_img = PILImage.open(image_data)
-                                # Resize image (optional, adjust as needed)
-                                # pil_img = pil_img.resize((100, 100), PILImage.Resampling.LANCZOS)
-                                # Save to BytesIO in a compatible format (PNG)
-                                img_buffer = BytesIO()
-                                pil_img.save(img_buffer, format="PNG")
-                                img_buffer.seek(0)
-                                # Embed in Excel
-                                img = OpenpyxlImage(img_buffer)
-                                ws.add_image(img, f"J{row_idx}")
-                            except Exception as e:
-                                logger.error(f"Failed to embed image {url} for row {row_idx}: {str(e)}")
+                if image_urls and image_urls != ["NA"]:
+                    for idx, url in enumerate(image_urls[:max_images]):  # Limit to max_images
+                        if url != "NA":
+                            image_data = download_image_in_memory(url)
+                            if image_data:
+                                try:
+                                    # Open image with PIL and resize
+                                    pil_img = PILImage.open(image_data)
+                                    # Resize to fit within cell (e.g., 120x120 pixels)
+                                    target_size = (120, 120)
+                                    pil_img.thumbnail(target_size, PILImage.Resampling.LANCZOS)
+                                    # Save to BytesIO in PNG format
+                                    img_buffer = BytesIO()
+                                    pil_img.save(img_buffer, format="PNG")
+                                    img_buffer.seek(0)
+                                    # Embed in Excel
+                                    img = OpenpyxlImage(img_buffer)
+                                    col_letter = openpyxl.utils.get_column_letter(image_start_col_idx + idx)
+                                    ws.add_image(img, f"{col_letter}{row_idx}")
+                                except Exception as e:
+                                    logger.error(f"Failed to embed image {url} for row {row_idx}, column {col_letter}: {str(e)}")
+                else:
+                    logger.info(f"Job {job_id}: No images to embed for row {row_idx}")
             
             wb.save(output_path)
         elif temp_file_path.endswith('.csv'):
@@ -535,6 +279,294 @@ def process_file_background(temp_file_path: str, batch_size: int = 5, job_id: st
             logger.info(f"Job {job_id}: Temporary file cleaned up")
         except Exception as e:
             logger.error(f"Job {job_id}: Failed to cleanup temporary file: {str(e)}")
+
+def get_product_info_using_selenium(item_name: str, retry_count: int = 0):
+    """Get detailed product information using Selenium with retry mechanism"""
+    max_retries = 3
+    product_info = {}
+    driver = None
+    
+    try:
+        logger.info(f"Searching Amazon for product: {item_name}")
+        
+        # Configure Chrome options
+        options = uc.ChromeOptions()
+        options.add_argument('--headless')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        
+        # Initialize undetected chromedriver
+        try:
+            driver = uc.Chrome(options=options, browser_executable_path=driver_executable_path)
+        except Exception as e:
+            if str(e).__contains__("This version of ChromeDriver only supports Chrome version"):
+                driver = updated_chromedriver(options)
+                
+            logger.error(f"Failed to initialize undetected_chromedriver: {str(e)}")
+            return {"error": f"Failed to initialize browser: {str(e)}"}
+        
+
+        # Go to Amazon.in
+        driver.get("https://www.amazon.in")
+        
+        random_sleep(3, 6)
+        
+        # Accept cookies if present
+        try:
+            cookie_button = WebDriverWait(driver, 5).until(
+                EC.element_to_be_clickable((By.ID, "sp-cc-accept"))
+            )
+            cookie_button.click()
+            random_sleep(1, 3)
+        except TimeoutException:
+            # Cookie dialog might not appear
+            pass
+        
+        # Search for the product
+        search_box = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "twotabsearchtextbox"))
+        )
+        search_box.clear()
+        # Type like a human - letter by letter with random delays
+        for char in item_name:
+            search_box.send_keys(char)
+            time.sleep(random.uniform(0.05, 0.2))
+        
+        search_button = WebDriverWait(driver, 10).until(
+            EC.element_to_be_clickable((By.ID, "nav-search-submit-button"))
+        )
+        search_button.click()
+        
+        random_sleep(3, 7)
+        
+        # Click on the first search result
+        try:
+            first_result = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "div.s-result-item[data-component-type='s-search-result'] img"))
+            )
+            first_result.click()
+            
+            # Switch to the new tab if opened
+            if len(driver.window_handles) > 1:
+                driver.switch_to.window(driver.window_handles[1])
+                
+            random_sleep(4, 8)
+            
+            # Extract product information
+            product_info = extract_product_details(driver)
+            
+            logger.info(f"Successfully scraped details for: {item_name}")
+            logger.info(f"Product info: {json.dumps(product_info)}")
+
+        except Exception as e:
+            logger.error(f"Error finding or clicking first result: {str(e)}")
+            product_info["error"] = f"Failed to find product results: {str(e)}"
+            
+    except Exception as e:
+        error_msg = f"Selenium error: {str(e)}"
+        logger.error(f"{error_msg} for product: {item_name}")
+        product_info["error"] = error_msg
+        
+        # Retry logic
+        if retry_count < max_retries:
+            retry_delay = (retry_count + 1) * 5  # Exponential backoff
+            logger.info(f"Retrying in {retry_delay} seconds (attempt {retry_count + 1}/{max_retries})...")
+            time.sleep(retry_delay)
+            if driver:
+                driver.quit()
+            return get_product_info_using_selenium(item_name, retry_count + 1)
+            
+    finally:
+        # Close the browser
+        if driver:
+            driver.quit()
+            
+    return product_info
+
+def extract_product_details(driver):
+    """Extract product details from the product page"""
+    product_info = {
+        "title": "",
+        "description": "",
+        "image": "",
+        "image_urls": [],  # List for multiple high-resolution images
+        "url": driver.current_url,
+        "price": "",
+        "composition": "",
+        "discontinued": "",
+        "unspsc_code": "",
+        "dimensions": "",
+        "weight": "",
+        "manufacturer": "",
+        "asin": "",
+        "model_number": "",  
+        "country_of_origin": "",
+        "date_first_available": "",
+        "included_components": "",
+        "generic_name": ""
+    }
+    
+    # Wait for page to load fully
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "imageBlock"))
+        )
+    except TimeoutException:
+        logger.warning("Image block not found, proceeding with extraction")
+
+    # Extract title
+    try:
+        product_info["title"] = driver.find_element(By.ID, "productTitle").text.strip()
+        if product_info["title"] == "":
+            product_info["title"] = driver.find_element(By.ID, "title").text.strip()
+    except NoSuchElementException:
+        product_info["title"] = "NA"
+    
+    # Extract price
+    try:
+        price_element = driver.find_element(By.CSS_SELECTOR, ".a-price .a-offscreen")
+        product_info["price"] = price_element.get_attribute("innerHTML").strip()
+    except NoSuchElementException:
+        try:
+            price_element = driver.find_elements(By.CLASS_NAME, "a-price-whole")[0]
+            product_info["price"] = price_element.text.strip().replace("\n.", "")
+        except:
+            product_info["price"] = "NA"
+    
+    # Extract main image URL
+    try:
+        img_element = driver.find_element(By.ID, "landingImage")
+        product_info["image"] = img_element.get_attribute("src")
+    except NoSuchElementException:
+        product_info["image"] = "NA"
+
+    # Extract multiple high-resolution image URLs
+    image_urls = []
+    try:
+        # Find all thumbnail list items in altImages
+        thumbnail_list_items = driver.find_elements(By.CSS_SELECTOR, "#altImages .a-button-thumbnail")
+        
+        for idx, list_item in enumerate(thumbnail_list_items[:10]):  # Limit to 10 images
+            try:
+                # Click the thumbnail
+                list_item.click()
+                # Wait for main image to update
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "a-dynamic-image"))
+                )
+                time.sleep(random.uniform(0.5, 1.5))  # Additional wait for image load
+                
+                # Extract high-res URL from a-dynamic-image
+                main_img = driver.find_element(By.CLASS_NAME, "a-dynamic-image")
+                high_res_url = main_img.get_attribute("data-old-hires") or main_img.get_attribute("src")
+                
+                if high_res_url and high_res_url not in image_urls:
+                    image_urls.append(high_res_url)
+                    logger.debug(f"Extracted high-res URL {idx+1}: {high_res_url}")
+                
+            except (WebDriverException, TimeoutException) as e:
+                logger.debug(f"Failed to process thumbnail {idx+1}: {str(e)}")
+                continue
+            
+        # If no images found from thumbnails, try getting the main image
+        if not image_urls:
+            try:
+                main_img = driver.find_element(By.CLASS_NAME, "a-dynamic-image")
+                high_res_url = main_img.get_attribute("data-old-hires") or main_img.get_attribute("src")
+                if high_res_url:
+                    image_urls.append(high_res_url)
+            except NoSuchElementException:
+                logger.info("No main image found with class a-dynamic-image")
+
+        # Finalize image_urls
+        product_info["image_urls"] = image_urls if image_urls else ["NA"]
+        logger.info(f"Extracted image URLs: {product_info['image_urls']}")
+
+    except Exception as e:
+        logger.error(f"Error extracting high-resolution images: {str(e)}")
+        product_info["image_urls"] = ["NA"]
+    
+    # Extract product description
+    try:
+        description_element = driver.find_element(By.ID, "productDescription")
+        product_info["description"] = description_element.text.strip()
+    except NoSuchElementException:
+        try:
+            description_elements = driver.find_elements(By.CSS_SELECTOR, "#feature-bullets .a-list-item")
+            product_info["description"] = "\n".join([item.text for item in description_elements])
+        except NoSuchElementException:
+            product_info["description"] = "NA"
+    
+    # Extract technical details from product information section
+    try:
+        detail_sections = driver.find_elements(By.CSS_SELECTOR, "table.a-keyvalue")
+        for section in detail_sections:
+            rows = section.find_elements(By.CSS_SELECTOR, "tr")
+            for row in rows:
+                try:
+                    key = row.find_element(By.CSS_SELECTOR, "th").text.strip().lower()
+                    value = row.find_element(By.CSS_SELECTOR, "td").text.strip()
+                    if "asin" in key:
+                        product_info["asin"] = value
+                    elif "manufacturer" in key:
+                        product_info["manufacturer"] = value
+                    elif "country of origin" in key:
+                        product_info["country_of_origin"] = value
+                    elif "date first available" in key:
+                        product_info["date_first_available"] = value
+                    elif "model" in key and "number" in key:
+                        product_info["model_number"] = value
+                    elif "item weight" in key or "weight" in key:
+                        product_info["weight"] = value
+                    elif "dimension" in key:
+                        product_info["dimensions"] = value
+                    elif "included" in key and "component" in key:
+                        product_info["included_components"] = value
+                    elif "generic name" in key:
+                        product_info["generic_name"] = value
+                    elif "composition" in key or "ingredients" in key:
+                        product_info["composition"] = value
+                except NoSuchElementException:
+                    continue
+        
+        try:
+            detail_list = driver.find_element(By.ID, "detailBullets_feature_div")
+            list_items = detail_list.find_elements(By.TAG_NAME, "li")
+            detail_sections = "\n".join([item.text.strip() for item in list_items])
+            if detail_sections:
+                product_info["product_details_as_on_amazon.in"] = detail_sections
+            else:
+                product_info["product_details_as_on_amazon.in"] = "NA"
+        except NoSuchElementException:
+            product_info["product_details_as_on_amazon.in"] = "NA"
+
+    except Exception as e:
+        logger.error(f"Error extracting technical details: {str(e)}")
+    
+    # Check if product is discontinued
+    try:
+        if "currently unavailable" in driver.page_source.lower() or "we don't know when or if this item will be back in stock" in driver.page_source.lower():
+            product_info["discontinued"] = "Yes"
+        else:
+            product_info["discontinued"] = "No"
+    except:
+        product_info["discontinued"] = "NA"
+        
+    return product_info
+
+def download_image_in_memory(image_url: str) -> Optional[BytesIO]:
+    """Download an image from a URL and return it as a BytesIO object"""
+    try:
+        response = requests.get(image_url, timeout=10)
+        if response.status_code == 200:
+            return BytesIO(response.content)
+        else:
+            logger.warning(f"Failed to download image from {image_url}: Status {response.status_code}")
+            return None
+    except Exception as e:
+        logger.error(f"Error downloading image {image_url}: {str(e)}")
+        return None
+
 
 @app.post("/upload/")
 async def upload_file(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
